@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 import numpy as np
 import os
 
@@ -9,11 +8,13 @@ _embedder = None
 def get_embedder(model_name: str = "all-MiniLM-L6-v2"):
     """
     Lazily load the embedding model unless disabled via DISABLE_EMBEDDINGS=1.
+    sentence-transformers is not installed in the deployment image when embeddings are disabled.
     """
     global _embedder
     if os.environ.get("DISABLE_EMBEDDINGS", "0") == "1":
         return None
     if _embedder is None:
+        from sentence_transformers import SentenceTransformer
         _embedder = SentenceTransformer(model_name)
     return _embedder
 

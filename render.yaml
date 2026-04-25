@@ -2,6 +2,6 @@ services:
   - type: web
     name: relevant-priors
     env: docker
-    plan: free
+    plan: starter
     dockerfilePath: Dockerfile
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT

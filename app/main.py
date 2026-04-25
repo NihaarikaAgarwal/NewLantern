@@ -11,7 +11,24 @@ from .schemas import RequestSchema, ResponseSchema, Prediction
 from .ml_model import predict_ml, predict_proba
 from .model import rule_based_decision
 
+logger = logging.getLogger("relevant_priors")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+handler.setFormatter(fmt)
+logger.addHandler(handler)
+
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def preload_models():
+    from .ml_model import load_model
+    from .encoder import _get_tfidf
+    _get_tfidf()
+    load_model()
+    logger.info("Models preloaded at startup")
+
 
 # Allow CORS and common methods so evaluator preflight/OPTIONS or POST to root won't be blocked
 app.add_middleware(
@@ -45,15 +62,6 @@ async def root_any(request: Request):
         return {"service": "relevant-priors", "endpoints": ["/predict (POST)", "/health (GET)"]}
     # For POST/OPTIONS/HEAD delegate to the same handler used by /predict
     return await predict(request)
-
-# Logging
-logger = logging.getLogger("relevant_priors")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-handler.setFormatter(fmt)
-logger.addHandler(handler)
-
 
 async def process_cases(cases: List[dict]) -> List[Prediction]:
     preds: List[Prediction] = []

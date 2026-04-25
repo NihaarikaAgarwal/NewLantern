@@ -33,8 +33,7 @@ def fit_tfidf(cases):
 
 
 def build_dataset(cases, truth):
-    X = []
-    y = []
+    X, y = [], []
     for case in cases:
         cid = case["case_id"]
         cur = case["current_study"]
@@ -50,12 +49,23 @@ def build_dataset(cases, truth):
 
 def train(public_json_path: str = "relevant_priors_public.json", test_size: float = 0.2, random_state: int = 42):
     cases, truth = load_public(public_json_path)
-    X, y = build_dataset(cases, truth)
-    if X.shape[0] == 0:
+
+    # Split by case (not by pair) to avoid leakage across a patient's studies
+    case_ids = list({c["case_id"] for c in cases})
+    train_ids, hold_ids = train_test_split(case_ids, test_size=test_size, random_state=random_state)
+    train_ids_set, hold_ids_set = set(train_ids), set(hold_ids)
+    train_cases = [c for c in cases if c["case_id"] in train_ids_set]
+    hold_cases = [c for c in cases if c["case_id"] in hold_ids_set]
+
+    # Fit TF-IDF only on training descriptions to prevent leakage into holdout
+    fit_tfidf(train_cases)
+
+    X_train, y_train = build_dataset(train_cases, truth)
+    X_hold, y_hold = build_dataset(hold_cases, truth)
+
+    if X_train.shape[0] == 0:
         print("No labeled pairs found to train on.")
         return
-
-    X_train, X_hold, y_train, y_hold = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y if len(np.unique(y)) > 1 else None)
 
     scaler = StandardScaler()
     Xs_train = scaler.fit_transform(X_train)
@@ -68,21 +78,79 @@ def train(public_json_path: str = "relevant_priors_public.json", test_size: floa
     joblib.dump(scaler, Path("app") / "scaler.joblib")
 
     preds_train = (clf.predict_proba(Xs_train)[:, 1] >= 0.5).astype(int)
-    correct_train = (preds_train == y_train).sum()
-    acc_train = correct_train / len(y_train)
+    acc_train = (preds_train == y_train).mean()
 
     preds_hold = (clf.predict_proba(Xs_hold)[:, 1] >= 0.5).astype(int)
     correct_hold = (preds_hold == y_hold).sum()
     incorrect_hold = (preds_hold != y_hold).sum()
     acc_hold = correct_hold / len(y_hold)
 
-    print(f"Trained on {len(y_train)} pairs — train accuracy: {acc_train:.4f} (correct={correct_train} incorrect={len(y_train)-correct_train})")
-    print(f"Holdout on {len(y_hold)} pairs — holdout accuracy: {acc_hold:.4f} (correct={correct_hold} incorrect={incorrect_hold})")
+    print(f"Split: {len(train_cases)} train cases ({len(y_train)} pairs) / {len(hold_cases)} holdout cases ({len(y_hold)} pairs)")
+    print(f"Train accuracy:   {acc_train:.4f}")
+    print(f"Holdout accuracy: {acc_hold:.4f} (correct={correct_hold} incorrect={incorrect_hold})")
+
+    _error_analysis(clf, scaler, hold_cases, truth, y_hold, preds_hold)
+
+
+def _error_analysis(clf, scaler, hold_cases, truth, y_hold, preds_hold):
+    modality_keywords = ["ct", "mri", "xray", "xr", "ultrasound", "us"]
+
+    def get_modality(desc):
+        tokens = set(desc.lower().split())
+        for m in modality_keywords:
+            if m in tokens:
+                return m
+        return "other"
+
+    def recency_bucket(days):
+        if days < 30:
+            return "<30d"
+        if days < 365:
+            return "30-365d"
+        if days < 1095:
+            return "1-3y"
+        return ">3y"
+
+    rows = []
+    for case in hold_cases:
+        cid = case["case_id"]
+        cur = case["current_study"]
+        for prior in case.get("prior_studies", []):
+            key = (cid, prior.get("study_id"))
+            if key not in truth:
+                continue
+            rows.append({
+                "modality": get_modality(cur.get("study_description", "")),
+                "recency": recency_bucket(abs((
+                    __import__("datetime").date.fromisoformat(cur.get("study_date", "2000-01-01")) -
+                    __import__("datetime").date.fromisoformat(prior.get("study_date", "2000-01-01"))
+                ).days) if cur.get("study_date") and prior.get("study_date") else 9999),
+                "truth": truth[key],
+            })
+
+    if not rows:
+        return
+    corrects = [p == r["truth"] for p, r in zip(preds_hold, rows)]
+
+    def summarise(key):
+        buckets = {}
+        for row, correct in zip(rows, corrects):
+            k = row[key]
+            buckets.setdefault(k, []).append(correct)
+        return buckets
+
+    print("\n--- Error analysis by modality ---")
+    for mod, vals in sorted(summarise("modality").items()):
+        print(f"  {mod:12s}: {sum(vals)/len(vals):.3f}  (n={len(vals)})")
+
+    print("\n--- Error analysis by recency ---")
+    for bucket in ["<30d", "30-365d", "1-3y", ">3y"]:
+        vals = summarise("recency").get(bucket, [])
+        if vals:
+            print(f"  {bucket:10s}: {sum(vals)/len(vals):.3f}  (n={len(vals)})")
 
 
 if __name__ == "__main__":
     import sys
     path = sys.argv[1] if len(sys.argv) > 1 else "relevant_priors_public.json"
-    cases, _ = load_public(path)
-    fit_tfidf(cases)
     train(path)

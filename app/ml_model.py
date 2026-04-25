@@ -51,12 +51,18 @@ def build_features(current_desc: str, current_date: str, prior_desc: str, prior_
     return np.array([cos_sim, token_frac, recency, same_mod, rule_pred], dtype=float)
 
 
+_clf: LogisticRegression | None = None
+_scaler: StandardScaler | None = None
+
+
 def load_model() -> Tuple[LogisticRegression, StandardScaler]:
-    if not MODEL_PATH.exists() or not SCALER_PATH.exists():
-        raise FileNotFoundError("Trained model not found. Run train_and_eval.py to train a model.")
-    clf = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return clf, scaler
+    global _clf, _scaler
+    if _clf is None or _scaler is None:
+        if not MODEL_PATH.exists() or not SCALER_PATH.exists():
+            raise FileNotFoundError("Trained model not found. Run train_and_eval.py to train a model.")
+        _clf = joblib.load(MODEL_PATH)
+        _scaler = joblib.load(SCALER_PATH)
+    return _clf, _scaler
 
 
 @lru_cache(maxsize=32768)

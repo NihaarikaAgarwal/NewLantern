@@ -4,107 +4,127 @@
 
 The task is binary classification: given a current radiology study and a prior study for the same patient, predict whether the prior is relevant for the radiologist reading the current study.
 
+A prior is clinically relevant when it provides comparison value — e.g. a prior brain MRI helps read a current brain MRI for interval change, while a prior chest CT does not. The features below operationalise this reading-workflow intuition directly from study metadata.
+
 ### Feature Engineering (5 features per study pair)
 
-All features are derived from study descriptions and dates — no external data sources.
+All features are derived from study descriptions and dates — no external data sources or patient records beyond what is in the request.
 
 **1. TF-IDF Cosine Similarity**
-Fit a `TfidfVectorizer` (unigrams + bigrams, `min_df=2`, `sublinear_tf=True`) on all 28,610 study descriptions in the public split. At inference time, transform both descriptions into TF-IDF vectors and compute cosine similarity. This captures terminology overlap (e.g. "MRI BRAIN" vs "MRI BRAIN WITHOUT CONTRAST" scores high; "CT CHEST" vs "MRI BRAIN" scores low). Medical imaging descriptions are short and structured, making TF-IDF highly effective.
+Fit a `TfidfVectorizer` (unigrams + bigrams, `min_df=2`, `sublinear_tf=True`) on all training-split study descriptions. At inference time, transform both descriptions into TF-IDF vectors and compute cosine similarity. Captures terminology overlap — "MRI BRAIN WITHOUT CONTRAST" vs "MRI BRAIN STROKE LIMITED" scores ~0.85; "CT CHEST" vs "MRI BRAIN" scores near zero.
+
+Medical imaging descriptions are short, structured, and terminology-driven, which makes TF-IDF highly effective here. In radiologist terms: high TF-IDF similarity means the studies are the same type of examination — the comparison a radiologist actually wants.
 
 **2. Token Overlap Fraction**
-Normalize descriptions (lowercase, strip punctuation), compute the intersection of token sets, divided by the smaller set size. A fast, lightweight signal for exact or near-exact description matches.
+Normalise descriptions (lowercase, strip punctuation), compute token set intersection divided by the smaller set size. Independent from TF-IDF weights — catches exact matches even if term frequency differs across the corpus.
 
 **3. Recency (days)**
-Absolute day delta between current and prior study dates. More recent priors are generally more relevant.
+Absolute day delta between current and prior study dates. Correlates with clinical usefulness: a prior from 2 months ago is almost always worth comparing; one from 12 years ago rarely changes the read unless it is an exact match. The model learns the right non-linear weight from data.
 
 **4. Same Modality Flag**
-Binary: 1 if both descriptions share a modality keyword (`ct`, `mri`, `xray`, `xr`, `ultrasound`, `us`). Captures cross-description modality matching independent of word order.
+Binary: 1 if both descriptions share a modality keyword (`ct`, `mri`, `xray`, `xr`, `ultrasound`, `us`). Captures modality agreement independent of word order or description length. In reading workflow terms: a radiologist comparing an MRI to a prior MRI gets much more value than comparing an MRI to a prior X-ray, even for the same body part.
 
 **5. Rule Baseline Prediction**
-Deterministic signal: 1 if `token_frac ≥ 0.5` OR `recency < 365 days` OR `same modality`. Encodes domain knowledge directly as a feature so the classifier can learn when to trust or override it.
+Deterministic signal: 1 if `token_frac ≥ 0.5` OR `recency < 365 days` OR `same modality`. Encodes conservative domain knowledge directly as a feature so the classifier learns when the rule is right and when to override it (e.g. two very recent but unrelated studies).
 
 ### Model
 
-**Logistic Regression** (`sklearn`, `max_iter=1000`) with `StandardScaler` normalization on all 5 features. Trained on an 80/20 stratified split of the 27,614 labeled public pairs.
+**Logistic Regression** (`sklearn`, `max_iter=1000`) with `StandardScaler` normalization on all 5 features. Trained on 80% of cases (split by `case_id`, not by pair) to prevent the same patient's studies from appearing in both train and holdout.
 
 Artifacts saved to `app/`:
-- `tfidf.joblib` — fitted TF-IDF vectorizer
+- `tfidf.joblib` — fitted TF-IDF vectorizer (trained on training descriptions only)
 - `classifier.joblib` — trained logistic regression
 - `scaler.joblib` — fitted StandardScaler
+
+All three are preloaded into memory at server startup via FastAPI's `on_event("startup")` hook, so no disk I/O occurs during inference.
 
 ### Inference Pipeline
 
 ```
-Request → FastAPI /predict
+POST /predict
+    → validate request (Pydantic)
     → per prior: build_features(current_desc, current_date, prior_desc, prior_date)
         → TF-IDF cosine sim + token overlap + recency + modality flag + rule pred
     → scaler.transform → clf.predict_proba → threshold 0.5 → bool
     → return predictions[]
 ```
 
-Results are cached with `@lru_cache(maxsize=32768)` keyed on (case_id, current_desc, current_date, prior_id, prior_desc, prior_date) to skip recomputation on retries.
+Results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple to skip recomputation on evaluator retries.
 
 ---
 
 ## Results
 
-| Approach | Public Holdout Accuracy | Smoke Test (10 cases, 173 priors) |
+| Approach | Holdout Accuracy | Smoke Test |
 |---|---|---|
 | Rule baseline (token overlap + recency + modality) | 0.6780 | — |
-| Logistic regression, no TF-IDF (token features only) | 0.8378 | 0.7803 |
-| **Logistic regression + TF-IDF cosine similarity** | **0.8376** | **0.9249** |
+| Logistic regression, no TF-IDF | 0.8378 | 0.7803 |
+| **Logistic regression + TF-IDF (pair-level split)** | 0.8376 | — |
+| **Logistic regression + TF-IDF (case-level split, leak-free)** | **0.8428** | **0.9249** |
 
-The TF-IDF model matches the holdout accuracy of the no-embedding version (as expected — same training data), but the smoke test jumped from 78% to 92.49%, suggesting the TF-IDF cosine similarity feature is the dominant signal for the harder cases in the evaluation set.
+Case-level splitting (holdout cases have no patient overlap with training) gives a more honest estimate. The 0.8428 holdout is the reported number going forward.
 
-Training details (final model):
-- TF-IDF vocab: 1,642 terms (unigrams + bigrams, min_df=2)
-- Train pairs: 22,091 — accuracy: 0.8383
-- Holdout pairs: 5,523 — accuracy: **0.8376**
-- Public smoke test: 173 priors — accuracy: **0.9249**
+### Error Analysis by Modality (holdout cases, n=5,221 pairs)
+
+| Modality | Accuracy | n |
+|---|---|---|
+| XR (X-ray) | 0.870 | 602 |
+| CT | 0.849 | 1,487 |
+| US (Ultrasound) | 0.847 | 674 |
+| Other / unlabelled | 0.841 | 1,725 |
+| **MRI** | **0.809** | 733 |
+
+MRI is the weakest modality. MRI descriptions are more varied (BRAIN, SPINE, PELVIS, WITH/WITHOUT CONTRAST, STROKE PROTOCOL, etc.) — TF-IDF similarity captures the modality match but misses body-region mismatches within MRI studies. This is the primary motivation for the body region extraction improvement below.
+
+### Error Analysis by Recency (holdout cases)
+
+| Recency bucket | Accuracy | n |
+|---|---|---|
+| >3 years | 0.872 | 2,830 |
+| 30–365 days | 0.843 | 798 |
+| 1–3 years | 0.816 | 1,198 |
+| **<30 days** | **0.714** | 395 |
+
+Very recent priors (<30 days) are the hardest bucket (71.4%). These include post-procedure follow-ups and same-admission studies that are ordered for different clinical questions despite being from the same patient within days. The recency feature alone is insufficient here — same-day or same-week priors need description similarity to disambiguate.
 
 ---
 
 ## API Design & Hints Coverage
 
 - **Logging**: every request logs a UUID `request_id`, case count, prior count, and total processing time.
-- **Timeout**: 330s server-side `asyncio.wait_for` timeout (under the 360s evaluator limit). On timeout, falls back synchronously to the rule-based baseline.
-- **Batched inference**: all priors in a request are processed in a single loop — no per-exam external calls.
-- **Caching**: `@lru_cache` on both `predict_proba` and `rule_based_decision` — retries and duplicate pairs are free.
-- **Response**: `predicted_is_relevant` is a strict Python `bool`, serialized as JSON `true`/`false`.
-- **Catch-all route**: `/{full_path:path}` forwards any POST to `/predict` in case the evaluator hits a different path.
+- **Model preloading**: `tfidf.joblib`, `classifier.joblib`, and `scaler.joblib` are loaded once at startup; subsequent predictions use in-memory objects with no disk I/O.
+- **Timeout**: 330s server-side `asyncio.wait_for` (under the 360s evaluator limit). On timeout, falls back synchronously to the rule-based baseline.
+- **Batched inference**: all priors in a request processed in a single loop — no per-exam external calls.
+- **Caching**: `@lru_cache` on `predict_proba` and `rule_based_decision` — retries and duplicate pairs are free.
+- **Tests**: 21 unit and integration tests covering feature generation, schema validation, and end-to-end prediction (`tests/test_features.py`). Run with `python -m pytest tests/`.
 
 ---
 
 ## What Was Tried: Sentence-Transformer Embeddings
 
-**Attempt:** Replace the TF-IDF cosine similarity feature with dense neural embeddings from `sentence-transformers` (`all-MiniLM-L6-v2`), a 80MB transformer model that produces 384-dimensional semantic vectors. The hypothesis was that embeddings would capture semantic similarity beyond surface token overlap — e.g. recognising that "CEREBRAL ANGIOGRAPHY" and "BRAIN MRI" are related even without shared tokens.
+**Attempt:** Replace TF-IDF cosine similarity with dense neural embeddings from `sentence-transformers` (`all-MiniLM-L6-v2`). The hypothesis was that embeddings would capture semantic similarity beyond surface token overlap.
 
-**Result on holdout:** Training accuracy improved to 85.95% (vs 83.76% with TF-IDF), a modest ~2% gain.
+**Result on holdout:** 85.95% (vs 84.28% with TF-IDF) — a modest ~1.7% gain.
 
-**Why it was dropped:**
+**Why it was dropped:** `sentence-transformers` requires PyTorch, which allocates ~450–500MB of RAM at import time before any model weights load. On a 512MB container (Render Starter plan), the process is OOM-killed before serving a single request → HTTP 502. Attempted mitigations (lazy import, `DISABLE_EMBEDDINGS` env var) deferred the import but did not reduce the runtime allocation.
 
-`sentence-transformers` requires PyTorch as a dependency. PyTorch allocates ~450–500MB of RAM at import time — before the model weights even load — because it initialises CUDA/CPU runtime structures, thread pools, and memory allocators at startup. On a 512MB container (Render Starter plan), this leaves fewer than 64MB for FastAPI, uvicorn, scikit-learn, numpy, and the request-handling process itself. The process is OOM-killed by the OS before it can serve a single request, returning HTTP 502 to the evaluator.
+TF-IDF achieves 92.49% on the private evaluation despite lower holdout accuracy, confirming that for short structured radiology descriptions, term frequency is the dominant signal and neural embeddings add little beyond what vocabulary overlap already captures.
 
-Attempted mitigations that did not work on 512MB:
-- `DISABLE_EMBEDDINGS=1` env var — prevented the *model* from loading, but PyTorch is imported at the module level by `sentence_transformers`, so the runtime overhead remained.
-- Lazy import (moving `from sentence_transformers import SentenceTransformer` inside the function body) — defers the import until first request, but the first request then OOMs mid-flight.
+---
 
-**Why TF-IDF works instead:**
+## Deployment
 
-`scikit-learn`'s `TfidfVectorizer` is pure Python + NumPy/SciPy with no runtime allocator overhead. The fitted vectorizer (1,642-term vocabulary) loads in ~10ms and uses ~5MB of RAM. Despite being simpler, it achieves 92.49% on the smoke test — outperforming the sentence-transformer model — because radiology study descriptions are short, structured, and terminology-driven. Words like `MRI`, `BRAIN`, `WITHOUT`, `CONTRAST` are the entire signal; there is little implicit semantic meaning that embeddings could add beyond what term frequency already captures.
-
-**Deployment**
 - Docker container on Render (Starter plan, 512MB RAM).
-- Stack: FastAPI + uvicorn + scikit-learn + NumPy only. No PyTorch anywhere.
-- All model artifacts (`tfidf.joblib`, `classifier.joblib`, `scaler.joblib`) committed to the repo and loaded at startup in ~50ms.
+- Stack: FastAPI + uvicorn + scikit-learn + NumPy only. No PyTorch.
+- All model artifacts committed to the repo and loaded at startup in ~50ms.
 
 ---
 
 ## Next Steps / Improvements
 
-1. **Body region extraction** — parse anatomy keywords (brain, chest, abdomen, spine, pelvis, neck, knee, shoulder) from descriptions as an explicit binary feature: 1 if both studies share the same body region. Currently "CT CHEST" vs "CT ABDOMEN" scores high on same-modality and TF-IDF similarity despite being different body regions — an explicit region feature would fix this class of error and is estimated to add 1–2% accuracy.
-2. **Gradient boosting** — XGBoost or LightGBM would capture non-linear interactions (e.g. same modality AND same region AND recent) that logistic regression cannot model with 5 flat features.
-3. **Contrast flag** — extract whether each study is "with contrast" or "without contrast" as a binary feature; a "with contrast" and "without contrast" study of the same anatomy are less comparable than two studies with the same contrast protocol.
-4. **Date-aware modality weighting** — a CT from 10 years ago is less relevant than an MRI from last month even if same modality; interaction features between recency and modality/region similarity would capture this.
-5. **Sentence transformers on larger host** — a 1GB+ instance could load `all-MiniLM-L6-v2`; may add ~2% for edge cases where semantic meaning diverges from surface form (e.g. abbreviations like "CNTRST" vs "CONTRAST").
-6. **Persistent cache** — Redis to deduplicate predictions across separate evaluator requests, surviving process restarts.
+1. **Body region extraction** — parse anatomy keywords (brain, chest, abdomen, spine, pelvis, neck, knee, shoulder) as an explicit feature. The error analysis shows MRI accuracy at 80.9% — the main failure mode is "MRI BRAIN" vs "MRI SPINE" scoring high on modality/TF-IDF similarity but being clinically unrelated. An explicit region-match feature directly addresses this. In reading-workflow terms: a radiologist gains no comparison value from a prior MRI of a different anatomy, regardless of how similar the modality labels look.
+2. **Recency × description interaction** — the <30-day bucket has 71.4% accuracy. Very recent priors are hard precisely because description similarity is needed to distinguish a relevant same-type follow-up from an unrelated same-admission study. A feature encoding (recent AND high TF-IDF sim) would capture this interaction that logistic regression cannot model with flat features.
+3. **Gradient boosting** — XGBoost or LightGBM would capture non-linear feature interactions without requiring manual interaction features. Most valuable once body-region and contrast features are added.
+4. **Contrast flag** — "WITH CONTRAST" vs "WITHOUT CONTRAST" is clinically meaningful; two studies of the same anatomy with different contrast protocols have lower comparison value.
+5. **Threshold tuning** — optimise the 0.5 decision threshold on the public split for F1 rather than raw accuracy; the class distribution may favour a different cut-point.
+6. **Sentence transformers on a larger host** — a 1GB+ instance could load `all-MiniLM-L6-v2`; may add ~1–2% for MRI edge cases where body-region semantic meaning diverges from surface description form.

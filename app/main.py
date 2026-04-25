@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .schemas import RequestSchema, ResponseSchema, Prediction
-from .ml_model import predict_ml
+from .ml_model import predict_ml, predict_proba
 from .model import rule_based_decision
 
 app = FastAPI()
@@ -20,6 +20,12 @@ async def health():
 @app.get("/")
 async def root():
     return {"service": "relevant-priors", "endpoints": ["/predict (POST)", "/health (GET)"]}
+
+
+@app.post("/")
+async def root_post(request: Request):
+    # Accept POST at root so evaluator can use base endpoint URL.
+    return await predict(request)
 
 # Logging
 logger = logging.getLogger("relevant_priors")

@@ -13,6 +13,7 @@ Option A — Render (recommended)
 - (Optional) Set environment variables under the service settings: `HF_TOKEN` for faster HF downloads, or any secret keys.  
 - Deploy; Render will build the image and expose a public URL you can paste into the challenge endpoint field.
 
+
 Option B — Fly (container host)
 - Install Fly CLI: https://fly.io/docs/getting-started/installing-flyctl/  
 - Create an app and deploy:

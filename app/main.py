@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .schemas import RequestSchema, ResponseSchema, Prediction
 from .ml_model import predict_ml, predict_proba
 from .model import rule_based_decision
+from .llm_scorer import score_all_cases
 
 logger = logging.getLogger("relevant_priors")
 logger.setLevel(logging.INFO)
@@ -63,22 +64,56 @@ async def root_any(request: Request):
     # For POST/OPTIONS/HEAD delegate to the same handler used by /predict
     return await predict(request)
 
+LLM_WEIGHT = 0.45
+ML_WEIGHT = 0.55
+
+
 async def process_cases(cases: List[dict]) -> List[Prediction]:
-    preds: List[Prediction] = []
     start = time.time()
+
+    # Step 1: get LLM scores for all cases concurrently (60s budget)
+    llm_scores = await score_all_cases(cases, timeout=60.0)
+    llm_time = time.time() - start
+    if llm_scores:
+        logger.info(f"LLM scoring done in {llm_time:.2f}s — {len(llm_scores)} pairs scored")
+
+    # Step 2: ML predictions, blended with LLM where available
+    preds: List[Prediction] = []
     for case in cases:
         cid = case["case_id"]
         cur = case["current_study"]
         for prior in case.get("prior_studies", []):
-            # ML hybrid prediction (embeddings + features + classifier). No fallback.
+            sid = prior.get("study_id", "")
             try:
-                prob = predict_proba(cid, cur.get("study_description", ""), cur.get("study_date", ""), prior.get("study_id", ""), prior.get("study_description", ""), prior.get("study_date", ""))
-                decision = bool(prob >= 0.5)
+                ml_prob = predict_proba(
+                    cid,
+                    cur.get("study_description", ""), cur.get("study_date", ""),
+                    sid,
+                    prior.get("study_description", ""), prior.get("study_date", ""),
+                )
             except Exception as e:
-                logger.error(f"ML predict error: {e}; using rule-based decision (prob=0.0)")
-                decision = rule_based_decision(cid, cur.get("study_description", ""), cur.get("study_date", ""), prior.get("study_id", ""), prior.get("study_description", ""), prior.get("study_date", ""))
-                prob = 1.0 if decision else 0.0
-            preds.append(Prediction(case_id=cid, study_id=prior.get("study_id", ""), predicted_is_relevant=bool(decision), confidence=float(prob)))
+                logger.error(f"ML predict error: {e}; falling back to rule baseline")
+                decision = rule_based_decision(
+                    cid,
+                    cur.get("study_description", ""), cur.get("study_date", ""),
+                    sid,
+                    prior.get("study_description", ""), prior.get("study_date", ""),
+                )
+                ml_prob = 1.0 if decision else 0.0
+
+            llm_prob = llm_scores.get((cid, sid))
+            if llm_prob is not None:
+                prob = ML_WEIGHT * ml_prob + LLM_WEIGHT * llm_prob
+            else:
+                prob = ml_prob
+
+            preds.append(Prediction(
+                case_id=cid,
+                study_id=sid,
+                predicted_is_relevant=bool(prob >= 0.5),
+                confidence=float(prob),
+            ))
+
     total = time.time() - start
     logger.info(f"Processed {len(cases)} cases, {len(preds)} priors in {total:.3f}s")
     return preds

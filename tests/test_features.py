@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from app.model import _tokens, days_between, rule_based_decision
-from app.ml_model import build_features, _same_modality_flag
+from app.ml_model import build_features, _same_modality_flag, _same_region_flag
 
 
 # --- _tokens ---
@@ -43,26 +43,41 @@ def test_same_modality_no_keyword():
 
 # --- build_features ---
 
+# --- _same_region_flag ---
+
+def test_same_region_both_brain():
+    assert _same_region_flag("MRI BRAIN WITHOUT CONTRAST", "MRI BRAIN WITH CONTRAST") == 1
+
+def test_same_region_brain_vs_chest():
+    assert _same_region_flag("MRI BRAIN", "CT CHEST") == 0
+
+def test_same_region_unknown_returns_minus_one():
+    assert _same_region_flag("ANGIOGRAM", "FLUOROSCOPY") == -1
+
+
+# --- build_features ---
+
 def test_build_features_shape():
     feats = build_features("MRI BRAIN", "2024-01-01", "MRI BRAIN", "2023-01-01")
-    assert feats.shape == (5,)
+    assert feats.shape == (6,)
 
 def test_build_features_identical_descriptions():
     feats = build_features("CT CHEST WITHOUT CONTRAST", "2024-01-01", "CT CHEST WITHOUT CONTRAST", "2024-01-01")
-    cos_sim, token_frac, recency, same_mod, rule_pred = feats
+    cos_sim, token_frac, recency, same_mod, same_region, rule_pred = feats
     assert token_frac == 1.0
     assert recency == 0
     assert same_mod == 1
+    assert same_region == 1
     assert rule_pred == 1
 
 def test_build_features_different_modality():
     feats = build_features("CT CHEST", "2024-01-01", "MRI BRAIN", "2020-01-01")
-    _, _, _, same_mod, _ = feats
+    _, _, _, same_mod, _, _ = feats
     assert same_mod == 0
 
 def test_build_features_recent_triggers_rule():
     feats = build_features("XRAY CHEST", "2024-06-01", "CT ABDOMEN", "2024-05-01")
-    _, _, recency, _, rule_pred = feats
+    _, _, recency, _, _, rule_pred = feats
     assert recency < 365
     assert rule_pred == 1
 

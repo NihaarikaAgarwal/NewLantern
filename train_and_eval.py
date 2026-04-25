@@ -44,7 +44,7 @@ def build_dataset(cases, truth):
             feats = build_features(cur.get("study_description", ""), cur.get("study_date", ""), prior.get("study_description", ""), prior.get("study_date", ""))
             X.append(feats)
             y.append(1 if truth[key] else 0)
-    return np.vstack(X) if X else np.zeros((0, 5)), np.array(y)
+    return np.vstack(X) if X else np.zeros((0, 6)), np.array(y)
 
 
 def train(public_json_path: str = "relevant_priors_public.json", test_size: float = 0.2, random_state: int = 42):

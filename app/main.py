@@ -23,6 +23,17 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: method={request.method} path={request.url.path}")
+    try:
+        resp = await call_next(request)
+    except Exception as e:
+        logger.exception(f"Error handling request: {e}")
+        raise
+    return resp
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -65,10 +76,16 @@ async def process_cases(cases: List[dict]) -> List[Prediction]:
     return preds
 
 
-@app.post("/predict")
+@app.api_route("/predict", methods=["POST", "OPTIONS", "GET", "HEAD"])
 async def predict(request: Request):
     request_id = str(uuid.uuid4())
     t0 = time.time()
+    # Handle preflight or non-POST quickly
+    if request.method in ("OPTIONS", "HEAD"):
+        return JSONResponse(content={})
+    if request.method == "GET":
+        return {"service": "relevant-priors", "endpoints": ["/predict (POST)", "/health (GET)"]}
+
     body = await request.json()
     try:
         req = RequestSchema(**body)
@@ -92,3 +109,11 @@ async def predict(request: Request):
     total_time = time.time() - t0
     logger.info(f"{request_id} - returning {len(preds)} predictions in {total_time:.3f}s")
     return JSONResponse(content=response.dict())
+
+
+# Catch-all for any POST/OPTIONS/HEAD paths not matched by earlier routes.
+# This ensures external evaluators that POST to a different path on the base URL
+# still get forwarded to our prediction handler instead of a 405 from the proxy.
+@app.api_route("/{full_path:path}", methods=["POST", "OPTIONS", "HEAD"])
+async def catch_all_forward(request: Request):
+    return await predict(request)

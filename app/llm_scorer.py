@@ -13,11 +13,11 @@ _async_client = None
 def _get_client():
     global _async_client
     if _async_client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
             return None
-        import anthropic
-        _async_client = anthropic.AsyncAnthropic(api_key=api_key)
+        from groq import AsyncGroq
+        _async_client = AsyncGroq(api_key=api_key)
     return _async_client
 
 
@@ -25,7 +25,7 @@ async def score_case(current_desc: str, current_date: str, priors: list) -> dict
     """
     One LLM call per case — all priors batched in a single prompt.
     Returns {study_id: score} where score is 0.0–1.0.
-    Cached by (current_desc, prior_desc) pair so retries are free.
+    Cached by (current_desc, prior_desc) so retries are free.
     """
     client = _get_client()
     if client is None:
@@ -60,14 +60,15 @@ async def score_case(current_desc: str, current_date: str, priors: list) -> dict
 
     try:
         response = await asyncio.wait_for(
-            client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            client.chat.completions.create(
+                model="llama-3.1-8b-instant",
                 max_tokens=256,
+                temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
             ),
             timeout=8.0,
         )
-        text = response.content[0].text.strip()
+        text = response.choices[0].message.content.strip()
         if text.startswith("```"):
             text = text.split("```")[1].lstrip("json").strip()
         scores = json.loads(text)["scores"]

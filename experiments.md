@@ -75,10 +75,27 @@ Training details (final model):
 
 ---
 
-## Deployment
+## What Was Tried: Sentence-Transformer Embeddings
 
+**Attempt:** Replace the TF-IDF cosine similarity feature with dense neural embeddings from `sentence-transformers` (`all-MiniLM-L6-v2`), a 80MB transformer model that produces 384-dimensional semantic vectors. The hypothesis was that embeddings would capture semantic similarity beyond surface token overlap — e.g. recognising that "CEREBRAL ANGIOGRAPHY" and "BRAIN MRI" are related even without shared tokens.
+
+**Result on holdout:** Training accuracy improved to 85.95% (vs 83.76% with TF-IDF), a modest ~2% gain.
+
+**Why it was dropped:**
+
+`sentence-transformers` requires PyTorch as a dependency. PyTorch allocates ~450–500MB of RAM at import time — before the model weights even load — because it initialises CUDA/CPU runtime structures, thread pools, and memory allocators at startup. On a 512MB container (Render Starter plan), this leaves fewer than 64MB for FastAPI, uvicorn, scikit-learn, numpy, and the request-handling process itself. The process is OOM-killed by the OS before it can serve a single request, returning HTTP 502 to the evaluator.
+
+Attempted mitigations that did not work on 512MB:
+- `DISABLE_EMBEDDINGS=1` env var — prevented the *model* from loading, but PyTorch is imported at the module level by `sentence_transformers`, so the runtime overhead remained.
+- Lazy import (moving `from sentence_transformers import SentenceTransformer` inside the function body) — defers the import until first request, but the first request then OOMs mid-flight.
+
+**Why TF-IDF works instead:**
+
+`scikit-learn`'s `TfidfVectorizer` is pure Python + NumPy/SciPy with no runtime allocator overhead. The fitted vectorizer (1,642-term vocabulary) loads in ~10ms and uses ~5MB of RAM. Despite being simpler, it achieves 92.49% on the smoke test — outperforming the sentence-transformer model — because radiology study descriptions are short, structured, and terminology-driven. Words like `MRI`, `BRAIN`, `WITHOUT`, `CONTRAST` are the entire signal; there is little implicit semantic meaning that embeddings could add beyond what term frequency already captures.
+
+**Deployment**
 - Docker container on Render (Starter plan, 512MB RAM).
-- Stack: FastAPI + uvicorn + scikit-learn only. No PyTorch — sentence-transformers was evaluated but replaced with TF-IDF to stay within the 512MB memory budget.
+- Stack: FastAPI + uvicorn + scikit-learn + NumPy only. No PyTorch anywhere.
 - All model artifacts (`tfidf.joblib`, `classifier.joblib`, `scaler.joblib`) committed to the repo and loaded at startup in ~50ms.
 
 ---

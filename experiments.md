@@ -6,7 +6,7 @@ The task is binary classification: given a current radiology study and a prior s
 
 A prior is clinically relevant when it provides comparison value — e.g. a prior brain MRI helps read a current brain MRI for interval change, while a prior chest CT does not. The features below operationalise this reading-workflow intuition directly from study metadata.
 
-### Feature Engineering (5 features per study pair)
+### Feature Engineering (6 features per study pair)
 
 All features are derived from study descriptions and dates — no external data sources or patient records beyond what is in the request.
 
@@ -38,18 +38,37 @@ Artifacts saved to `app/`:
 
 All three are preloaded into memory at server startup via FastAPI's `on_event("startup")` hook, so no disk I/O occurs during inference.
 
+### LLM Scoring Layer (Groq / Llama 3.1 8B)
+
+On top of the ML model, an optional LLM scoring layer uses `llama-3.1-8b-instant` via the Groq API to re-score prior relevance. Groq provides free-tier inference at ~300ms per call.
+
+**Design:**
+- One API call per case, all prior studies batched in a single prompt — never one call per prior
+- All calls fired concurrently via `asyncio.gather` with a 60s total budget
+- In-process cache keyed on `(current_desc, prior_desc)` so retries and repeated pairs cost nothing
+- Prompt instructs the model to score 0.0–1.0 based on same body region + same modality reasoning
+- Final probability: `0.55 × ml_prob + 0.45 × llm_prob`
+- Fully optional — if `GROQ_API_KEY` is unset or calls time out, falls back to ML-only silently
+
+**Result on smoke test (10 cases, 173 priors):**
+
+| Model | Smoke Test Accuracy |
+|---|---|
+| ML only (6 features) | 0.9249 |
+| ML + LLM blend | **0.9480** |
+
 ### Inference Pipeline
 
 ```
 POST /predict
     → validate request (Pydantic)
-    → per prior: build_features(current_desc, current_date, prior_desc, prior_date)
-        → TF-IDF cosine sim + token overlap + recency + modality flag + rule pred
-    → scaler.transform → clf.predict_proba → threshold 0.5 → bool
-    → return predictions[]
+    → [concurrent] fire one Groq LLM call per case (all priors batched, 60s timeout)
+    → per prior: build_features → scaler.transform → clf.predict_proba
+    → if LLM score available: final = 0.55 × ml_prob + 0.45 × llm_prob
+    → threshold 0.5 → bool → return predictions[]
 ```
 
-Results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple to skip recomputation on evaluator retries.
+ML results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple. LLM results cached in a module-level dict by `(current_desc, prior_desc)`.
 
 ---
 
@@ -59,8 +78,10 @@ Results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple to ski
 |---|---|---|
 | Rule baseline (token overlap + recency + modality) | 0.6780 | — |
 | Logistic regression, no TF-IDF | 0.8378 | 0.7803 |
-| **Logistic regression + TF-IDF (pair-level split)** | 0.8376 | — |
-| **Logistic regression + TF-IDF (case-level split, leak-free)** | **0.8428** | **0.9249** |
+| Logistic regression + TF-IDF (pair-level split) | 0.8376 | — |
+| Logistic regression + TF-IDF (case-level split, leak-free) | 0.8428 | 0.9249 |
+| + Body region feature | 0.8603 | — |
+| **+ LLM blend (Groq / Llama 3.1 8B)** | — | **0.9480** |
 
 Case-level splitting (holdout cases have no patient overlap with training) gives a more honest estimate. The 0.8428 holdout is the reported number going forward.
 

@@ -102,9 +102,9 @@ Attempted mitigations that did not work on 512MB:
 
 ## Next Steps / Improvements
 
-1. **Gradient boosting** — XGBoost or LightGBM would capture non-linear interactions (e.g. same modality AND very recent) that logistic regression cannot.
-2. **Body region extraction** — parse anatomy keywords (brain, chest, abdomen, spine) from descriptions as an explicit feature; two studies of the same body region are almost always relevant to each other.
-3. **Date-aware modality weighting** — a CT from 10 years ago is less relevant than an MRI from last month, even if same modality; interaction features between recency and modality/description similarity.
-4. **Threshold tuning** — optimize the 0.5 decision threshold on the public split for F1 rather than raw accuracy.
-5. **Persistent cache** — Redis to deduplicate predictions across separate evaluator requests (survives restarts).
-6. **Sentence transformers on larger host** — a 1GB+ instance could load `all-MiniLM-L6-v2`; may add ~2% accuracy for edge cases where semantic meaning differs from surface form.
+1. **Body region extraction** — parse anatomy keywords (brain, chest, abdomen, spine, pelvis, neck, knee, shoulder) from descriptions as an explicit binary feature: 1 if both studies share the same body region. Currently "CT CHEST" vs "CT ABDOMEN" scores high on same-modality and TF-IDF similarity despite being different body regions — an explicit region feature would fix this class of error and is estimated to add 1–2% accuracy.
+2. **Gradient boosting** — XGBoost or LightGBM would capture non-linear interactions (e.g. same modality AND same region AND recent) that logistic regression cannot model with 5 flat features.
+3. **Contrast flag** — extract whether each study is "with contrast" or "without contrast" as a binary feature; a "with contrast" and "without contrast" study of the same anatomy are less comparable than two studies with the same contrast protocol.
+4. **Date-aware modality weighting** — a CT from 10 years ago is less relevant than an MRI from last month even if same modality; interaction features between recency and modality/region similarity would capture this.
+5. **Sentence transformers on larger host** — a 1GB+ instance could load `all-MiniLM-L6-v2`; may add ~2% for edge cases where semantic meaning diverges from surface form (e.g. abbreviations like "CNTRST" vs "CONTRAST").
+6. **Persistent cache** — Redis to deduplicate predictions across separate evaluator requests, surviving process restarts.

@@ -101,9 +101,14 @@ async def predict(request: Request):
         # enforce a safe timeout shorter than evaluator's 360s
         preds = await asyncio.wait_for(process_cases([c.dict() for c in req.cases]), timeout=330)
     except asyncio.TimeoutError:
-        logger.error(f"{request_id} - processing timed out, using fallback rule baseline")
-        # fallback: run rule baseline synchronously (should be fast)
-        preds = await process_cases([c.dict() for c in req.cases])
+        logger.error(f"{request_id} - processing timed out, using rule-based fallback")
+        preds = []
+        for case in req.cases:
+            cid = case.case_id
+            cur = case.current_study
+            for prior in case.prior_studies:
+                decision = rule_based_decision(cid, cur.study_description, cur.study_date, prior.study_id, prior.study_description, prior.study_date)
+                preds.append(Prediction(case_id=cid, study_id=prior.study_id, predicted_is_relevant=bool(decision), confidence=1.0 if decision else 0.0))
 
     response = ResponseSchema(predictions=preds)
     total_time = time.time() - t0

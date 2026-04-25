@@ -34,10 +34,12 @@ def build_features(current_desc: str, current_date: str, prior_desc: str, prior_
     # embeddings
     emb = embed_texts([current_desc, prior_desc])
     a, b = emb[0], emb[1]
-    # cosine similarity
-    num = float(np.dot(a, b))
-    den = float(np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
-    cos_sim = num / den
+    # cosine similarity. If embeddings are zero-vectors (disabled), fall back to token_frac.
+    norm_product = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if norm_product < 1e-6:
+        cos_sim = token_frac
+    else:
+        cos_sim = float(np.dot(a, b)) / norm_product
 
     recency = days_between(current_date, prior_date)
     same_mod = _same_modality_flag(current_desc, prior_desc)

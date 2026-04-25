@@ -5,6 +5,7 @@ import logging
 from typing import List
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import RequestSchema, ResponseSchema, Prediction
 from .ml_model import predict_ml, predict_proba
@@ -12,19 +13,26 @@ from .model import rule_based_decision
 
 app = FastAPI()
 
+# Allow CORS and common methods so evaluator preflight/OPTIONS or POST to root won't be blocked
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-@app.get("/")
-async def root():
-    return {"service": "relevant-priors", "endpoints": ["/predict (POST)", "/health (GET)"]}
-
-
-@app.post("/")
-async def root_post(request: Request):
-    # Accept POST at root so evaluator can use base endpoint URL.
+@app.api_route("/", methods=["GET", "POST", "OPTIONS", "HEAD"])
+async def root_any(request: Request):
+    # Support GET for human check, POST for evaluator (forward to /predict logic)
+    if request.method == "GET":
+        return {"service": "relevant-priors", "endpoints": ["/predict (POST)", "/health (GET)"]}
+    # For POST/OPTIONS/HEAD delegate to the same handler used by /predict
     return await predict(request)
 
 # Logging

@@ -50,12 +50,15 @@ def build_dataset(cases, truth):
 def train(public_json_path: str = "relevant_priors_public.json", test_size: float = 0.2, random_state: int = 42):
     cases, truth = load_public(public_json_path)
 
-    # Split by case (not by pair) to avoid leakage across a patient's studies
-    case_ids = list({c["case_id"] for c in cases})
-    train_ids, hold_ids = train_test_split(case_ids, test_size=test_size, random_state=random_state)
+    # Split by patient_id (falling back to case_id if absent) so the same patient
+    # never appears in both train and holdout — prevents study-pair leakage.
+    split_key = "patient_id" if all(c.get("patient_id") for c in cases) else "case_id"
+    unique_ids = list({c[split_key] for c in cases})
+    train_ids, hold_ids = train_test_split(unique_ids, test_size=test_size, random_state=random_state)
     train_ids_set, hold_ids_set = set(train_ids), set(hold_ids)
-    train_cases = [c for c in cases if c["case_id"] in train_ids_set]
-    hold_cases = [c for c in cases if c["case_id"] in hold_ids_set]
+    train_cases = [c for c in cases if c[split_key] in train_ids_set]
+    hold_cases  = [c for c in cases if c[split_key] in hold_ids_set]
+    print(f"Split key: {split_key} — {len(train_ids_set)} train / {len(hold_ids_set)} holdout")
 
     # Fit TF-IDF only on training descriptions to prevent leakage into holdout
     fit_tfidf(train_cases)
@@ -93,11 +96,12 @@ def train(public_json_path: str = "relevant_priors_public.json", test_size: floa
 
 
 def _error_analysis(clf, scaler, hold_cases, truth, y_hold, preds_hold):
-    modality_keywords = ["ct", "mri", "xray", "xr", "ultrasound", "us"]
+    from app.model import _tokens as tokenize
+    from app.ml_model import _MODALITIES
 
     def get_modality(desc):
-        tokens = set(desc.lower().split())
-        for m in modality_keywords:
+        tokens = tokenize(desc)
+        for m in _MODALITIES:
             if m in tokens:
                 return m
         return "other"

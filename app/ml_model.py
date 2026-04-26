@@ -26,8 +26,9 @@ _REGIONS = {
 
 
 def _same_modality_flag(cur_desc: str, pri_desc: str) -> int:
-    cur = set(cur_desc.lower().split())
-    pri = set(pri_desc.lower().split())
+    # use _tokens for consistent normalization (handles punctuation, abbreviations, case)
+    cur = _tokens(cur_desc)
+    pri = _tokens(pri_desc)
     for m in _MODALITIES:
         if m in cur and m in pri:
             return 1
@@ -35,8 +36,9 @@ def _same_modality_flag(cur_desc: str, pri_desc: str) -> int:
 
 
 def _same_region_flag(cur_desc: str, pri_desc: str) -> int:
-    cur = set(cur_desc.lower().split()) & _REGIONS
-    pri = set(pri_desc.lower().split()) & _REGIONS
+    # use _tokens for consistent normalization (handles punctuation, abbreviations, case)
+    cur = _tokens(cur_desc) & _REGIONS
+    pri = _tokens(pri_desc) & _REGIONS
     if not cur or not pri:
         return -1  # unknown — no region keyword found in one or both
     return 1 if cur & pri else 0

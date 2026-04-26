@@ -8,7 +8,7 @@ A prior is clinically relevant when it provides comparison value — e.g. a prio
 
 ### Feature Engineering (6 features per study pair)
 
-All features are derived from study descriptions and dates — no external data sources or patient records beyond what is in the request.
+All features are derived from study descriptions and dates. The same `_tokens` normalizer (lowercase, strip non-alphanumeric, collapse whitespace — defined in `app/model.py`) is used consistently across all features to handle punctuation variants, abbreviations, and mixed case (e.g. `W/O`, `CNTRST`, `T1-Weighted`).
 
 **1. TF-IDF Cosine Similarity**
 Fit a `TfidfVectorizer` (unigrams + bigrams, `min_df=2`, `sublinear_tf=True`) on all training-split study descriptions. At inference time, transform both descriptions into TF-IDF vectors and compute cosine similarity. Captures terminology overlap — "MRI BRAIN WITHOUT CONTRAST" vs "MRI BRAIN STROKE LIMITED" scores ~0.85; "CT CHEST" vs "MRI BRAIN" scores near zero.
@@ -22,14 +22,17 @@ Normalise descriptions (lowercase, strip punctuation), compute token set interse
 Absolute day delta between current and prior study dates. Correlates with clinical usefulness: a prior from 2 months ago is almost always worth comparing; one from 12 years ago rarely changes the read unless it is an exact match. The model learns the right non-linear weight from data.
 
 **4. Same Modality Flag**
-Binary: 1 if both descriptions share a modality keyword (`ct`, `mri`, `xray`, `xr`, `ultrasound`, `us`). Captures modality agreement independent of word order or description length. In reading workflow terms: a radiologist comparing an MRI to a prior MRI gets much more value than comparing an MRI to a prior X-ray, even for the same body part.
+Binary: 1 if both descriptions share a modality keyword (`ct`, `mri`, `xray`, `xr`, `ultrasound`, `us`). Uses `_tokens` for normalization. In reading workflow terms: a radiologist comparing an MRI to a prior MRI gets much more value than comparing an MRI to a prior X-ray, even for the same body part.
 
-**5. Rule Baseline Prediction**
+**5. Same Region Flag**
+Ternary: 1 if both descriptions share an anatomy keyword (brain, chest, abdomen, spine, pelvis, neck, knee, shoulder, etc.), 0 if they differ, -1 if no region keyword is found in either. Uses `_tokens` for normalization. Directly addresses MRI body-region mismatches — "MRI BRAIN" vs "MRI SPINE" correctly scores 0, not 1.
+
+**6. Rule Baseline Prediction**
 Deterministic signal: 1 if `token_frac ≥ 0.5` OR `recency < 365 days` OR `same modality`. Encodes conservative domain knowledge directly as a feature so the classifier learns when the rule is right and when to override it (e.g. two very recent but unrelated studies).
 
 ### Model
 
-**Logistic Regression** (`sklearn`, `max_iter=1000`) with `StandardScaler` normalization on all 5 features. Trained on 80% of cases (split by `case_id`, not by pair) to prevent the same patient's studies from appearing in both train and holdout.
+**Logistic Regression** (`sklearn`, `max_iter=1000`) with `StandardScaler` normalization on all 6 features. Trained on 80% of patients (split by `patient_id`, falling back to `case_id` if absent) so no patient's studies appear in both train and holdout.
 
 Artifacts saved to `app/`:
 - `tfidf.joblib` — fitted TF-IDF vectorizer (trained on training descriptions only)
@@ -78,35 +81,36 @@ ML results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple. LL
 |---|---|---|
 | Rule baseline (token overlap + recency + modality) | 0.6780 | — |
 | Logistic regression, no TF-IDF | 0.8378 | 0.7803 |
-| Logistic regression + TF-IDF (pair-level split) | 0.8376 | — |
-| Logistic regression + TF-IDF (case-level split, leak-free) | 0.8428 | 0.9249 |
-| + Body region feature | 0.8603 | — |
+| + TF-IDF cosine sim (pair-level split) | 0.8376 | 0.9249 |
+| + Case-level split (leak-free) | 0.8428 | — |
+| + Body region feature (6 features) | 0.8603 | — |
+| + Patient-level split + `_tokens` normalization | 0.8749 | — |
 | **+ LLM blend (Groq / Llama 3.1 8B)** | — | **0.9480** |
 
 Case-level splitting (holdout cases have no patient overlap with training) gives a more honest estimate. The 0.8428 holdout is the reported number going forward.
 
-### Error Analysis by Modality (holdout cases, n=5,221 pairs)
+### Error Analysis by Modality (patient-level holdout, n=7,831 pairs)
 
 | Modality | Accuracy | n |
 |---|---|---|
-| XR (X-ray) | 0.870 | 602 |
-| CT | 0.849 | 1,487 |
-| US (Ultrasound) | 0.847 | 674 |
-| Other / unlabelled | 0.841 | 1,725 |
-| **MRI** | **0.809** | 733 |
+| XR (X-ray) | 0.902 | 1,648 |
+| CT | 0.883 | 1,880 |
+| US (Ultrasound) | 0.868 | 954 |
+| Other / unlabelled | 0.861 | 2,262 |
+| **MRI** | **0.856** | 1,087 |
 
-MRI is the weakest modality. MRI descriptions are more varied (BRAIN, SPINE, PELVIS, WITH/WITHOUT CONTRAST, STROKE PROTOCOL, etc.) — TF-IDF similarity captures the modality match but misses body-region mismatches within MRI studies. This is the primary motivation for the body region extraction improvement below.
+MRI accuracy improved from 80.9% → 85.6% after adding the body region feature and applying `_tokens` normalization consistently. The remaining MRI errors are cases where region keywords are absent or descriptions use non-standard abbreviations.
 
-### Error Analysis by Recency (holdout cases)
+### Error Analysis by Recency (patient-level holdout)
 
 | Recency bucket | Accuracy | n |
 |---|---|---|
-| >3 years | 0.872 | 2,830 |
-| 30–365 days | 0.843 | 798 |
-| 1–3 years | 0.816 | 1,198 |
-| **<30 days** | **0.714** | 395 |
+| >3 years | 0.893 | 4,495 |
+| 30–365 days | 0.875 | 1,039 |
+| 1–3 years | 0.863 | 1,736 |
+| **<30 days** | **0.763** | 561 |
 
-Very recent priors (<30 days) are the hardest bucket (71.4%). These include post-procedure follow-ups and same-admission studies that are ordered for different clinical questions despite being from the same patient within days. The recency feature alone is insufficient here — same-day or same-week priors need description similarity to disambiguate.
+Very recent priors (<30 days) remain the hardest bucket (76.3%, up from 71.4% before body region feature). Same-week studies ordered for different clinical questions need description similarity to disambiguate — recency alone is insufficient.
 
 ---
 

@@ -13,8 +13,38 @@ def test_tokens_strips_punctuation():
     # slash is replaced by space, so "W/O" splits into tokens "w" and "o"
     assert "/" not in " ".join(_tokens("MRI W/O CONTRAST"))
 
+def test_tokens_strips_period():
+    assert "." not in " ".join(_tokens("CT HEAD W.O. CONTRAST"))
+
 def test_tokens_empty():
     assert _tokens("") == set()
+
+def test_tokens_abbreviation_cntrst():
+    # "CNTRST" should be a token (no punctuation to strip)
+    assert "cntrst" in _tokens("CT CHEST WITHOUT CNTRST")
+
+def test_tokens_hyphen_stripped():
+    # hyphens are non-alphanum, replaced by space
+    assert "-" not in " ".join(_tokens("MRI BRAIN T1-WEIGHTED"))
+
+
+# --- _same_modality_flag uses _tokens (punctuation-robust) ---
+
+def test_modality_flag_with_slash():
+    # "CT" extracted correctly even with surrounding punctuation
+    assert _same_modality_flag("CT/CHEST WITHOUT CONTRAST", "CT HEAD") == 1
+
+def test_modality_flag_mixed_case():
+    assert _same_modality_flag("Mri Brain", "MRI SPINE") == 1
+
+
+# --- _same_region_flag uses _tokens (punctuation-robust) ---
+
+def test_region_flag_with_punctuation():
+    assert _same_region_flag("MRI BRAIN/STROKE", "MRI BRAIN WITHOUT CONTRAST") == 1
+
+def test_region_flag_hyphenated():
+    assert _same_region_flag("CT CHEST-ABDOMEN", "CT CHEST") == 1
 
 
 # --- days_between ---

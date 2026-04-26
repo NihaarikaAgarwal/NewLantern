@@ -30,7 +30,7 @@ def build_dataset(cases, truth):
             X.append(feats)
             y.append(1 if truth[key] else 0)
             keys.append(key)
-    return np.vstack(X) if X else np.zeros((0,5)), np.array(y), keys
+    return np.vstack(X) if X else np.zeros((0, 6)), np.array(y), keys
 
 
 def evaluate(public_json_path: str = "relevant_priors_public.json"):

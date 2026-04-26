@@ -87,7 +87,7 @@ ML results cached with `@lru_cache(maxsize=32768)` keyed on the full 6-tuple. LL
 | + Patient-level split + `_tokens` normalization | 0.8749 | — |
 | **+ LLM blend (Groq / Llama 3.1 8B)** | — | **0.9480** |
 
-Case-level splitting (holdout cases have no patient overlap with training) gives a more honest estimate. The 0.8428 holdout is the reported number going forward.
+Patient-level splitting (no patient appears in both train and holdout) gives the most honest estimate. The 0.8749 patient-split holdout is the reported number for the shipped model.
 
 ### Error Analysis by Modality (patient-level holdout, n=7,831 pairs)
 
@@ -121,7 +121,7 @@ Very recent priors (<30 days) remain the hardest bucket (76.3%, up from 71.4% be
 - **Timeout**: 330s server-side `asyncio.wait_for` (under the 360s evaluator limit). On timeout, falls back synchronously to the rule-based baseline.
 - **Batched inference**: all priors in a request processed in a single loop — no per-exam external calls.
 - **Caching**: `@lru_cache` on `predict_proba` and `rule_based_decision` — retries and duplicate pairs are free.
-- **Tests**: 21 unit and integration tests covering feature generation, schema validation, and end-to-end prediction (`tests/test_features.py`). Run with `python -m pytest tests/`.
+- **Tests**: 31 unit and integration tests covering feature generation (including punctuation/abbreviation edge cases), schema validation, and end-to-end prediction (`tests/test_features.py`). Run with `python -m pytest tests/`.
 
 ---
 
@@ -147,9 +147,9 @@ TF-IDF achieves 92.49% on the private evaluation despite lower holdout accuracy,
 
 ## Next Steps / Improvements
 
-1. **Body region extraction** — parse anatomy keywords (brain, chest, abdomen, spine, pelvis, neck, knee, shoulder) as an explicit feature. The error analysis shows MRI accuracy at 80.9% — the main failure mode is "MRI BRAIN" vs "MRI SPINE" scoring high on modality/TF-IDF similarity but being clinically unrelated. An explicit region-match feature directly addresses this. In reading-workflow terms: a radiologist gains no comparison value from a prior MRI of a different anatomy, regardless of how similar the modality labels look.
-2. **Recency × description interaction** — the <30-day bucket has 71.4% accuracy. Very recent priors are hard precisely because description similarity is needed to distinguish a relevant same-type follow-up from an unrelated same-admission study. A feature encoding (recent AND high TF-IDF sim) would capture this interaction that logistic regression cannot model with flat features.
-3. **Gradient boosting** — XGBoost or LightGBM would capture non-linear feature interactions without requiring manual interaction features. Most valuable once body-region and contrast features are added.
-4. **Contrast flag** — "WITH CONTRAST" vs "WITHOUT CONTRAST" is clinically meaningful; two studies of the same anatomy with different contrast protocols have lower comparison value.
-5. **Threshold tuning** — optimise the 0.5 decision threshold on the public split for F1 rather than raw accuracy; the class distribution may favour a different cut-point.
+1. **Recency × description interaction** — the <30-day bucket is still the hardest at 76.3%. Very recent priors are hard because recency alone cannot distinguish a relevant same-type follow-up from an unrelated same-admission study. An explicit interaction feature (recent AND high TF-IDF similarity) would capture this signal that logistic regression cannot model with flat features.
+2. **Gradient boosting** — XGBoost or LightGBM would capture non-linear feature interactions (e.g. same region AND same modality AND recent) without requiring manual cross-product features.
+3. **Contrast flag** — "WITH CONTRAST" vs "WITHOUT CONTRAST" is clinically meaningful; two studies of the same anatomy with different contrast protocols have lower comparison value. Extractable from the description with a simple keyword check.
+4. **Threshold tuning** — optimise the 0.5 decision threshold on the public split for F1 rather than raw accuracy; the class distribution may favour a different cut-point.
+5. **Stronger LLM model** — swapping `llama-3.1-8b-instant` for a larger model (70B or frontier) on the hard cases (low ML confidence, no region keyword match) could improve the remaining ~24% errors in the <30-day bucket.
 6. **Sentence transformers on a larger host** — a 1GB+ instance could load `all-MiniLM-L6-v2`; may add ~1–2% for MRI edge cases where body-region semantic meaning diverges from surface description form.
